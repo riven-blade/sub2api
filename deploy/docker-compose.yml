@@ -3,26 +3,37 @@
 # =============================================================================
 # Quick Start:
 #   1. Copy .env.example to .env and configure
-#   2. docker-compose up -d
-#   3. Check logs: docker-compose logs -f sub2api
+#   2. docker compose up -d
+#   3. Check logs: docker compose logs -f sub2api
 #   4. Access: http://localhost:8080
 #
 # All configuration is done via environment variables.
 # No Setup Wizard needed - the system auto-initializes on first run.
 # =============================================================================
 
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "${DOCKER_LOG_MAX_SIZE:-20m}"
+    max-file: "${DOCKER_LOG_MAX_FILE:-5}"
+
 services:
   # ===========================================================================
   # Sub2API Application
   # ===========================================================================
   sub2api:
-    image: weishaw/sub2api:latest
+    image: ${SUB2API_IMAGE:-weishaw/sub2api}:${SUB2API_VERSION:-0.1.103}
     container_name: sub2api
     restart: unless-stopped
+    init: true
+    stop_grace_period: 45s
     ulimits:
       nofile:
         soft: 100000
         hard: 100000
+    logging: *default-logging
+    env_file:
+      - .env
     ports:
       - "${BIND_HOST:-0.0.0.0}:${SERVER_PORT:-8080}:8080"
     volumes:
@@ -36,6 +47,7 @@ services:
       # Auto Setup (REQUIRED for Docker deployment)
       # =======================================================================
       - AUTO_SETUP=true
+      - DATA_DIR=/app/data
 
       # =======================================================================
       # Server Configuration
@@ -150,19 +162,32 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 30s
+      start_period: 60s
 
   # ===========================================================================
   # PostgreSQL Database
   # ===========================================================================
   postgres:
-    image: postgres:18-alpine
+    image: ${POSTGRES_IMAGE:-postgres:18-alpine}
     container_name: sub2api-postgres
     restart: unless-stopped
+    stop_grace_period: 1m
     ulimits:
       nofile:
         soft: 100000
         hard: 100000
+    logging: *default-logging
+    shm_size: ${POSTGRES_SHM_SIZE:-256m}
+    command:
+      - postgres
+      - -c
+      - max_connections=${POSTGRES_MAX_CONNECTIONS:-200}
+      - -c
+      - shared_buffers=${POSTGRES_SHARED_BUFFERS:-256MB}
+      - -c
+      - effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-1GB}
+      - -c
+      - maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-64MB}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     environment:
@@ -189,21 +214,25 @@ services:
   # Redis Cache
   # ===========================================================================
   redis:
-    image: redis:8-alpine
+    image: ${REDIS_IMAGE:-redis:8-alpine}
     container_name: sub2api-redis
     restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
     ulimits:
       nofile:
         soft: 100000
         hard: 100000
+    logging: *default-logging
     volumes:
       - redis_data:/data
     command: >
         sh -c '
-          redis-server
+          exec redis-server
           --save 60 1
           --appendonly yes
           --appendfsync everysec
+          --maxclients ${REDIS_MAXCLIENTS:-10000}
           ${REDIS_PASSWORD:+--requirepass "$REDIS_PASSWORD"}'
     environment:
       - TZ=${TZ:-Asia/Shanghai}

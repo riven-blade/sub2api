@@ -1,5 +1,7 @@
-# 修改为你的域名
-api.sub2api.com {
+# 修改为你的域名；也可以通过环境变量覆盖：
+#   SERVER_NAME=api.example.com
+#   UPSTREAM=sub2api:8080
+{$SERVER_NAME:api.sub2api.com} {
         # =========================================================================
 	# 静态资源长期缓存（高优先级，放在最前面）
 	# 带 hash 的文件可以永久缓存，浏览器和 CDN 都会缓存
@@ -30,7 +32,7 @@ api.sub2api.com {
 	# =========================================================================
 	# 反向代理配置
 	# =========================================================================
-	reverse_proxy localhost:8080 {
+	reverse_proxy {$UPSTREAM:sub2api:8080} {
 		# 健康检查
 		health_uri /health
 		health_interval 30s
@@ -45,9 +47,6 @@ api.sub2api.com {
 		# 传递真实客户端信息
 		# 兼容 Cloudflare 和直连：后端应优先读取 CF-Connecting-IP，其次 X-Real-IP
 		header_up X-Real-IP {remote_host}
-		header_up X-Forwarded-For {remote_host}
-		header_up X-Forwarded-Proto {scheme}
-		header_up X-Forwarded-Host {host}
 		# 保留 Cloudflare 原始头（如果存在）
 		# 后端获取 IP 的优先级建议: CF-Connecting-IP → X-Real-IP → X-Forwarded-For
 		header_up CF-Connecting-IP {http.request.header.CF-Connecting-IP}
@@ -88,18 +87,14 @@ api.sub2api.com {
 	# 请求大小限制 (防止大文件攻击)
 	# =========================================================================
 	request_body {
-		max_size 100MB
+		max_size {$MAX_REQUEST_BODY:256MB}
 	}
 
 	# =========================================================================
 	# 日志配置
 	# =========================================================================
 	log {
-		output file /var/log/caddy/sub2api.log {
-			roll_size 50mb
-			roll_keep 10
-			roll_keep_for 720h
-		}
+		output stdout
 		format json
 		level INFO
 	}
