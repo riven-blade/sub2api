@@ -59,6 +59,9 @@ docker compose -f docker-compose.local.yml up -d
 # View logs
 docker compose -f docker-compose.local.yml logs -f sub2api
 
+# If admin password was auto-generated, find it in logs:
+docker compose -f docker-compose.local.yml logs sub2api | grep "admin password"
+
 # Access Web UI
 # http://localhost:8080
 ```
@@ -88,7 +91,7 @@ mkdir -p data postgres_data redis_data
 # Start all services using local directory version
 docker compose -f docker-compose.local.yml up -d
 
-# View logs
+# View logs (check for auto-generated admin password if not set in .env)
 docker compose -f docker-compose.local.yml logs -f sub2api
 
 # Access Web UI
@@ -119,7 +122,7 @@ When using Docker Compose with `AUTO_SETUP=true`:
 
 3. If `ADMIN_PASSWORD` is not set, check logs for the generated password:
    ```bash
-   docker-compose logs sub2api | grep "admin password"
+   docker compose logs sub2api | grep "admin password"
    ```
 
 ### Database Migration Notes (PostgreSQL)
@@ -493,19 +496,19 @@ For **local directory version**:
 
 ```bash
 # Check container status
-docker-compose -f docker-compose.local.yml ps
+docker compose -f docker-compose.local.yml ps
 
 # View detailed logs
-docker-compose -f docker-compose.local.yml logs --tail=100 sub2api
+docker compose -f docker-compose.local.yml logs --tail=100 sub2api
 
 # Check database connection
-docker-compose -f docker-compose.local.yml exec postgres pg_isready
+docker compose -f docker-compose.local.yml exec postgres pg_isready
 
 # Check Redis connection
-docker-compose -f docker-compose.local.yml exec redis redis-cli ping
+docker compose -f docker-compose.local.yml exec redis redis-cli ping
 
 # Restart all services
-docker-compose -f docker-compose.local.yml restart
+docker compose -f docker-compose.local.yml restart
 
 # Check data directories
 ls -la data/ postgres_data/ redis_data/
@@ -515,19 +518,19 @@ For **named volumes version**:
 
 ```bash
 # Check container status
-docker-compose ps
+docker compose ps
 
 # View detailed logs
-docker-compose logs --tail=100 sub2api
+docker compose logs --tail=100 sub2api
 
 # Check database connection
-docker-compose exec postgres pg_isready
+docker compose exec postgres pg_isready
 
 # Check Redis connection
-docker-compose exec redis redis-cli ping
+docker compose exec redis redis-cli ping
 
 # Restart all services
-docker-compose restart
+docker compose restart
 ```
 
 ### Binary Install
