@@ -2,6 +2,9 @@ package service
 
 import (
 	"testing"
+	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 )
 
 func TestResolveDefaultTierID(t *testing.T) {
@@ -78,5 +81,45 @@ func TestResolveDefaultTierID(t *testing.T) {
 				t.Fatalf("resolveDefaultTierID() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestBuildAntigravityRefreshTokenInfo_UsesReturnedRefreshToken(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1_700_000_000, 0)
+	tokenInfo := buildAntigravityRefreshTokenInfo(&antigravity.TokenResponse{
+		AccessToken:  "access-new",
+		RefreshToken: "refresh-new",
+		ExpiresIn:    3600,
+		TokenType:    "Bearer",
+	}, "refresh-old", now)
+
+	if tokenInfo.AccessToken != "access-new" {
+		t.Fatalf("AccessToken = %q, want %q", tokenInfo.AccessToken, "access-new")
+	}
+	if tokenInfo.RefreshToken != "refresh-new" {
+		t.Fatalf("RefreshToken = %q, want %q", tokenInfo.RefreshToken, "refresh-new")
+	}
+	if tokenInfo.ExpiresAt != now.Unix()+3600-300 {
+		t.Fatalf("ExpiresAt = %d, want %d", tokenInfo.ExpiresAt, now.Unix()+3600-300)
+	}
+}
+
+func TestBuildAntigravityRefreshTokenInfo_FallsBackToSubmittedRefreshToken(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1_700_000_000, 0)
+	tokenInfo := buildAntigravityRefreshTokenInfo(&antigravity.TokenResponse{
+		AccessToken: "access-new",
+		ExpiresIn:   3600,
+		TokenType:   "Bearer",
+	}, "refresh-old", now)
+
+	if tokenInfo.RefreshToken != "refresh-old" {
+		t.Fatalf("RefreshToken = %q, want %q", tokenInfo.RefreshToken, "refresh-old")
+	}
+	if tokenInfo.ExpiresAt != now.Unix()+3600-300 {
+		t.Fatalf("ExpiresAt = %d, want %d", tokenInfo.ExpiresAt, now.Unix()+3600-300)
 	}
 }

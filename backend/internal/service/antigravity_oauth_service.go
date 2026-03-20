@@ -176,17 +176,10 @@ func (s *AntigravityOAuthService) RefreshToken(ctx context.Context, refreshToken
 		}
 		tokenResp, err := client.RefreshToken(ctx, refreshToken)
 		if err == nil {
-			now := time.Now()
-			expiresAt := now.Unix() + tokenResp.ExpiresIn - 300
+			tokenInfo := buildAntigravityRefreshTokenInfo(tokenResp, refreshToken, time.Now())
 			fmt.Printf("[AntigravityOAuth] Token refreshed: expires_in=%d, expires_at=%d (%s)\n",
-				tokenResp.ExpiresIn, expiresAt, time.Unix(expiresAt, 0).Format("2006-01-02 15:04:05"))
-			return &AntigravityTokenInfo{
-				AccessToken:  tokenResp.AccessToken,
-				RefreshToken: tokenResp.RefreshToken,
-				ExpiresIn:    tokenResp.ExpiresIn,
-				ExpiresAt:    expiresAt,
-				TokenType:    tokenResp.TokenType,
-			}, nil
+				tokenInfo.ExpiresIn, tokenInfo.ExpiresAt, time.Unix(tokenInfo.ExpiresAt, 0).Format("2006-01-02 15:04:05"))
+			return tokenInfo, nil
 		}
 
 		if isNonRetryableAntigravityOAuthError(err) {
@@ -196,6 +189,24 @@ func (s *AntigravityOAuthService) RefreshToken(ctx context.Context, refreshToken
 	}
 
 	return nil, fmt.Errorf("token 刷新失败 (重试后): %w", lastErr)
+}
+
+func buildAntigravityRefreshTokenInfo(tokenResp *antigravity.TokenResponse, fallbackRefreshToken string, now time.Time) *AntigravityTokenInfo {
+	refreshToken := strings.TrimSpace(tokenResp.RefreshToken)
+	if refreshToken == "" {
+		// Google-style refresh responses may omit refresh_token; preserve the submitted RT.
+		refreshToken = strings.TrimSpace(fallbackRefreshToken)
+	}
+
+	expiresAt := now.Unix() + tokenResp.ExpiresIn - 300
+
+	return &AntigravityTokenInfo{
+		AccessToken:  tokenResp.AccessToken,
+		RefreshToken: refreshToken,
+		ExpiresIn:    tokenResp.ExpiresIn,
+		ExpiresAt:    expiresAt,
+		TokenType:    tokenResp.TokenType,
+	}
 }
 
 // ValidateRefreshToken 用 refresh token 验证并获取完整的 token 信息（含 email 和 project_id）
