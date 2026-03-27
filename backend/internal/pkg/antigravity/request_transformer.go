@@ -20,22 +20,82 @@ var (
 	sessionRandMutex sync.Mutex
 )
 
+func generateNativeAgentRequestID() string {
+	return fmt.Sprintf("agent/%d/%s/1", time.Now().UnixMilli(), uuid.NewString())
+}
+
+// GenerateNativeAgentRequestID 生成原生格式的 agent requestId。
+func GenerateNativeAgentRequestID() string {
+	return generateNativeAgentRequestID()
+}
+
+// GenerateSessionIDFromContents 从原始 request map 中提取 contents 并生成稳定的 sessionId
+// 导出供 gateway service 的 wrapV1InternalRequest 路径使用
+func GenerateSessionIDFromContents(request map[string]any) string {
+	contentsRaw, ok := request["contents"]
+	if !ok {
+		return generateFallbackSessionID()
+	}
+
+	// 尝试从 contents 中提取第一个 user 消息文本
+	contents, ok := contentsRaw.([]any)
+	if !ok || len(contents) == 0 {
+		return generateFallbackSessionID()
+	}
+
+	for _, c := range contents {
+		cMap, ok := c.(map[string]any)
+		if !ok {
+			continue
+		}
+		role, _ := cMap["role"].(string)
+		if role != "user" {
+			continue
+		}
+		parts, ok := cMap["parts"].([]any)
+		if !ok || len(parts) == 0 {
+			continue
+		}
+		part, ok := parts[0].(map[string]any)
+		if !ok {
+			continue
+		}
+		text, ok := part["text"].(string)
+		if ok && text != "" {
+			h := sha256.Sum256([]byte(text))
+			n := int64(binary.BigEndian.Uint64(h[:8])) & 0x7FFFFFFFFFFFFFFF
+			return "-" + strconv.FormatInt(n, 10)
+		}
+	}
+
+	return generateFallbackSessionID()
+}
+
+// generateFallbackSessionID 回退生成随机 sessionID
+func generateFallbackSessionID() string {
+	sessionRandMutex.Lock()
+	n := sessionRand.Int63n(9_000_000_000_000_000_000)
+	sessionRandMutex.Unlock()
+	return "-" + strconv.FormatInt(n, 10)
+}
+
 // generateStableSessionID 基于用户消息内容生成稳定的 session ID
 func generateStableSessionID(contents []GeminiContent) string {
 	// 查找第一个 user 消息的文本
 	for _, content := range contents {
 		if content.Role == "user" && len(content.Parts) > 0 {
 			if text := content.Parts[0].Text; text != "" {
-				h := sha256.Sum256([]byte(text))
-				n := int64(binary.BigEndian.Uint64(h[:8])) & 0x7FFFFFFFFFFFFFFF
-				return "-" + strconv.FormatInt(n, 10)
+				return HashToSessionKey(text)
 			}
 		}
 	}
-	// 回退：生成随机 session ID
-	sessionRandMutex.Lock()
-	n := sessionRand.Int63n(9_000_000_000_000_000_000)
-	sessionRandMutex.Unlock()
+	return generateFallbackSessionID()
+}
+
+// HashToSessionKey 将文本哈希为稳定的 session key（格式: "-数字"）
+func HashToSessionKey(text string) string {
+	h := sha256.Sum256([]byte(text))
+	n := int64(binary.BigEndian.Uint64(h[:8])) & 0x7FFFFFFFFFFFFFFF
 	return "-" + strconv.FormatInt(n, 10)
 }
 
@@ -45,10 +105,11 @@ type TransformOptions struct {
 	// 为空时使用默认模板（包含 [IDENTITY_PATCH] 及 SYSTEM_PROMPT_BEGIN 标记）。
 	IdentityPatch string
 	EnableMCPXML  bool
+	SessionKey    string // 会话标识，用于稳定 sessionId（为空则自动从消息内容派生）
 }
 
-func DefaultTransformOptions() TransformOptions {
-	return TransformOptions{
+func DefaultTransformOptions() *TransformOptions {
+	return &TransformOptions{
 		EnableIdentityPatch: true,
 		EnableMCPXML:        true,
 	}
@@ -84,7 +145,7 @@ func TransformClaudeToGemini(claudeReq *ClaudeRequest, projectID, mappedModel st
 }
 
 // TransformClaudeToGeminiWithOptions 将 Claude 请求转换为 v1internal Gemini 格式（可配置身份补丁等行为）
-func TransformClaudeToGeminiWithOptions(claudeReq *ClaudeRequest, projectID, mappedModel string, opts TransformOptions) ([]byte, error) {
+func TransformClaudeToGeminiWithOptions(claudeReq *ClaudeRequest, projectID, mappedModel string, opts *TransformOptions) ([]byte, error) {
 	// 用于存储 tool_use id -> name 映射
 	toolIDToName := make(map[string]string)
 
@@ -113,7 +174,7 @@ func TransformClaudeToGeminiWithOptions(claudeReq *ClaudeRequest, projectID, map
 	}
 
 	// 2. 构建 systemInstruction（使用 targetModel 而非原始请求模型，确保身份注入基于最终模型）
-	systemInstruction := buildSystemInstruction(claudeReq.System, targetModel, opts, claudeReq.Tools)
+	systemInstruction := buildSystemInstruction(claudeReq.System, targetModel, *opts, claudeReq.Tools)
 
 	// 3. 构建 generationConfig
 	reqForConfig := claudeReq
@@ -144,7 +205,7 @@ func TransformClaudeToGeminiWithOptions(claudeReq *ClaudeRequest, projectID, map
 			},
 		},
 		// 总是生成 sessionId，基于用户消息内容
-		SessionID: generateStableSessionID(contents),
+		SessionID: "", // 下面统一设置
 	}
 
 	if systemInstruction != nil {
@@ -157,15 +218,27 @@ func TransformClaudeToGeminiWithOptions(claudeReq *ClaudeRequest, projectID, map
 		innerRequest.Tools = tools
 	}
 
-	// 如果提供了 metadata.user_id，优先使用
+	// 统一计算 sessionKey（只调用一次 generateStableSessionID，避免随机回退场景下两次调用产生不同值）
+	sessionKey := opts.SessionKey
+	if sessionKey == "" {
+		sessionKey = generateStableSessionID(contents)
+		// 回写给调用方，确保后续逻辑复用同一个稳定 sessionKey
+		opts.SessionKey = sessionKey
+	}
+
+	// sessionId：优先使用 metadata.user_id，否则使用稳定的 sessionKey
 	if claudeReq.Metadata != nil && claudeReq.Metadata.UserID != "" {
 		innerRequest.SessionID = claudeReq.Metadata.UserID
+	} else {
+		innerRequest.SessionID = sessionKey
 	}
+
+	requestID := GenerateNativeAgentRequestID()
 
 	// 6. 包装为 v1internal 请求
 	v1Req := V1InternalRequest{
 		Project:     projectID,
-		RequestID:   "agent-" + uuid.New().String(),
+		RequestID:   requestID,
 		UserAgent:   "antigravity", // 固定值，与官方客户端一致
 		RequestType: requestType,
 		Model:       targetModel,

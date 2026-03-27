@@ -49,8 +49,11 @@ const (
 	antigravityDailyBaseURL = "https://daily-cloudcode-pa.sandbox.googleapis.com"
 )
 
-// defaultUserAgentVersion 可通过环境变量 ANTIGRAVITY_USER_AGENT_VERSION 配置，默认 1.20.5
-var defaultUserAgentVersion = "1.20.5"
+// defaultUserAgentVersion 可通过环境变量 ANTIGRAVITY_USER_AGENT_VERSION 配置，默认 1.20.6
+var defaultUserAgentVersion = "1.20.6"
+
+// defaultUserAgentPlatform 可通过环境变量 ANTIGRAVITY_USER_AGENT_PLATFORM 配置，默认 darwin/arm64
+var defaultUserAgentPlatform = "darwin/arm64"
 
 // defaultClientSecret 可通过环境变量 ANTIGRAVITY_OAUTH_CLIENT_SECRET 配置
 var defaultClientSecret = "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"
@@ -60,6 +63,10 @@ func init() {
 	if version := os.Getenv("ANTIGRAVITY_USER_AGENT_VERSION"); version != "" {
 		defaultUserAgentVersion = version
 	}
+	// 从环境变量读取平台信息，未设置则使用默认值
+	if platform := os.Getenv("ANTIGRAVITY_USER_AGENT_PLATFORM"); platform != "" {
+		defaultUserAgentPlatform = platform
+	}
 	// 从环境变量读取 client_secret，未设置则使用默认值
 	if secret := os.Getenv(AntigravityOAuthClientSecretEnv); secret != "" {
 		defaultClientSecret = secret
@@ -68,7 +75,16 @@ func init() {
 
 // GetUserAgent 返回当前配置的 User-Agent
 func GetUserAgent() string {
-	return fmt.Sprintf("antigravity/%s windows/amd64", defaultUserAgentVersion)
+	return fmt.Sprintf("antigravity/%s %s", defaultUserAgentVersion, defaultUserAgentPlatform)
+}
+
+// GetUserAgentForPlatform 返回指定平台的 User-Agent（per-account 支持）
+// platform 为空时使用全局默认值
+func GetUserAgentForPlatform(platform string) string {
+	if platform == "" {
+		platform = defaultUserAgentPlatform
+	}
+	return fmt.Sprintf("antigravity/%s %s", defaultUserAgentVersion, platform)
 }
 
 func getClientSecret() (string, error) {

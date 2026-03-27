@@ -2,9 +2,11 @@ package antigravity
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -399,4 +401,17 @@ func TestTransformClaudeToGeminiWithOptions_PreservesBillingHeaderSystemBlock(t 
 			require.True(t, found, "转换后的 systemInstruction 应保留 x-anthropic-billing-header 内容")
 		})
 	}
+}
+
+func TestGenerateNativeAgentRequestID_Format(t *testing.T) {
+	requestID := GenerateNativeAgentRequestID()
+	parts := strings.Split(requestID, "/")
+	require.Len(t, parts, 4)
+	require.Equal(t, "agent", parts[0])
+	require.NotEmpty(t, parts[1])
+	_, err := strconv.ParseInt(parts[1], 10, 64)
+	require.NoError(t, err)
+	_, err = uuid.Parse(parts[2])
+	require.NoError(t, err)
+	require.Equal(t, "1", parts[3])
 }

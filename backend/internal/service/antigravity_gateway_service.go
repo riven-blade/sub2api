@@ -23,7 +23,6 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 )
 
@@ -145,7 +144,17 @@ type antigravityRetryLoopParams struct {
 
 // antigravityRetryLoopResult 重试循环的结果
 type antigravityRetryLoopResult struct {
-	resp *http.Response
+	resp        *http.Response
+	UsedBaseURL string // 实际命中的上游 base URL
+}
+
+func applyAntigravityUserAgentOverride(req *http.Request, account *Account) {
+	if req == nil || account == nil {
+		return
+	}
+	if uaPlatform := account.GetCredential("user_agent_platform"); uaPlatform != "" {
+		req.Header.Set("User-Agent", antigravity.GetUserAgentForPlatform(uaPlatform))
+	}
 }
 
 // resolveAntigravityForwardBaseURL 解析转发用 base URL。
@@ -304,6 +313,7 @@ func (s *AntigravityGatewayService) handleSmartRetry(p antigravityRetryLoopParam
 					},
 				}
 			}
+			applyAntigravityUserAgentOverride(retryReq, p.account)
 
 			retryResp, retryErr := p.httpUpstream.Do(retryReq, p.proxyURL, p.account.ID, p.account.Concurrency)
 			if retryErr == nil && retryResp != nil && retryResp.StatusCode != http.StatusTooManyRequests && retryResp.StatusCode != http.StatusServiceUnavailable {
@@ -489,6 +499,7 @@ func (s *AntigravityGatewayService) handleSingleAccountRetryInPlace(
 			logger.LegacyPrintf("service.antigravity_gateway", "%s single_account_503_retry: request_build_failed error=%v", p.prefix, err)
 			break
 		}
+		applyAntigravityUserAgentOverride(retryReq, p.account)
 
 		retryResp, retryErr := p.httpUpstream.Do(retryReq, p.proxyURL, p.account.ID, p.account.Concurrency)
 		if retryErr == nil && retryResp != nil && retryResp.StatusCode != http.StatusTooManyRequests && retryResp.StatusCode != http.StatusServiceUnavailable {
@@ -626,6 +637,7 @@ urlFallbackLoop:
 			if err != nil {
 				return nil, err
 			}
+			applyAntigravityUserAgentOverride(upstreamReq, p.account)
 
 			// Capture upstream request body for ops retry of this attempt.
 			if p.c != nil && len(p.body) > 0 {
@@ -788,7 +800,7 @@ urlFallbackLoop:
 		antigravity.DefaultURLAvailability.MarkSuccess(usedBaseURL)
 	}
 
-	return &antigravityRetryLoopResult{resp: resp}, nil
+	return &antigravityRetryLoopResult{resp: resp, UsedBaseURL: usedBaseURL}, nil
 }
 
 // shouldRetryAntigravityError 判断是否应该重试
@@ -1146,7 +1158,7 @@ func (s *AntigravityGatewayService) buildClaudeTestRequest(projectID, mappedMode
 	return antigravity.TransformClaudeToGemini(claudeReq, projectID, mappedModel)
 }
 
-func (s *AntigravityGatewayService) getClaudeTransformOptions(ctx context.Context) antigravity.TransformOptions {
+func (s *AntigravityGatewayService) getClaudeTransformOptions(ctx context.Context) *antigravity.TransformOptions {
 	opts := antigravity.DefaultTransformOptions()
 	if s.settingService == nil {
 		return opts
@@ -1270,16 +1282,32 @@ func injectIdentityPatchToGeminiRequest(body []byte) ([]byte, error) {
 	return json.Marshal(request)
 }
 
-// wrapV1InternalRequest 包装请求为 v1internal 格式
+// wrapV1InternalRequest 包装请求为 v1internal 格式。
 func (s *AntigravityGatewayService) wrapV1InternalRequest(projectID, model string, originalBody []byte) ([]byte, error) {
-	var request any
+	var request map[string]any
 	if err := json.Unmarshal(originalBody, &request); err != nil {
 		return nil, fmt.Errorf("解析请求体失败: %w", err)
 	}
 
+	// 注入 sessionId（如果请求中没有），基于 contents 内容哈希生成稳定的负数 ID
+	if _, ok := request["sessionId"]; !ok {
+		request["sessionId"] = antigravity.GenerateSessionIDFromContents(request)
+	}
+
+	// 注入 toolConfig（如果请求中没有且存在 tools）
+	if _, ok := request["toolConfig"]; !ok {
+		if tools, hasTool := request["tools"]; hasTool && tools != nil {
+			request["toolConfig"] = map[string]any{
+				"functionCallingConfig": map[string]any{"mode": "VALIDATED"},
+			}
+		}
+	}
+
+	requestID := antigravity.GenerateNativeAgentRequestID()
+
 	wrapped := map[string]any{
 		"project":     projectID,
-		"requestId":   "agent-" + uuid.New().String(),
+		"requestId":   requestID,
 		"userAgent":   "antigravity", // 固定值，与官方客户端一致
 		"requestType": "agent",
 		"model":       model,
@@ -1473,7 +1501,7 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 
 				logger.LegacyPrintf("service.antigravity_gateway", "Antigravity account %d: detected signature-related 400, retrying once (%s)", account.ID, stage.name)
 
-				retryGeminiBody, txErr := antigravity.TransformClaudeToGeminiWithOptions(&retryClaudeReq, projectID, mappedModel, s.getClaudeTransformOptions(ctx))
+				retryGeminiBody, txErr := antigravity.TransformClaudeToGeminiWithOptions(&retryClaudeReq, projectID, mappedModel, transformOpts)
 				if txErr != nil {
 					continue
 				}
@@ -1742,13 +1770,15 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 		firstTokenMs = streamRes.firstTokenMs
 	}
 
+	totalDuration := time.Since(startTime)
+
 	return &ForwardResult{
 		RequestID:        requestID,
 		Usage:            *usage,
 		Model:            originalModel,
 		UpstreamModel:    billingModel,
 		Stream:           claudeReq.Stream,
-		Duration:         time.Since(startTime),
+		Duration:         totalDuration,
 		FirstTokenMs:     firstTokenMs,
 		ClientDisconnect: clientDisconnect,
 	}, nil
@@ -2204,8 +2234,9 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 
 				fallbackWrapped, err := s.wrapV1InternalRequest(projectID, fallbackModel, injectedBody)
 				if err == nil {
-					fallbackReq, err := antigravity.NewAPIRequest(ctx, upstreamAction, accessToken, fallbackWrapped)
+					fallbackReq, err := antigravity.NewAPIRequestWithURL(ctx, result.UsedBaseURL, upstreamAction, accessToken, fallbackWrapped)
 					if err == nil {
+						applyAntigravityUserAgentOverride(fallbackReq, account)
 						fallbackResp, err := s.httpUpstream.Do(fallbackReq, proxyURL, account.ID, account.Concurrency)
 						if err == nil && fallbackResp.StatusCode < 400 {
 							_ = resp.Body.Close()
@@ -2436,13 +2467,15 @@ handleSuccess:
 		imageCount = 1
 	}
 
+	totalDuration := time.Since(startTime)
+
 	return &ForwardResult{
 		RequestID:        requestID,
 		Usage:            *usage,
 		Model:            originalModel,
 		UpstreamModel:    billingModel,
 		Stream:           stream,
-		Duration:         time.Since(startTime),
+		Duration:         totalDuration,
 		FirstTokenMs:     firstTokenMs,
 		ClientDisconnect: clientDisconnect,
 		ImageCount:       imageCount,
@@ -4006,7 +4039,8 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 			lastDataAt = time.Now()
 
 			// 处理 SSE 行，转换为 Claude 格式
-			claudeEvents := processor.ProcessLine(strings.TrimRight(ev.line, "\r\n"))
+			trimmed := strings.TrimRight(ev.line, "\r\n")
+			claudeEvents := processor.ProcessLine(trimmed)
 			if len(claudeEvents) > 0 {
 				if firstTokenMs == nil {
 					ms := int(time.Since(startTime).Milliseconds())
